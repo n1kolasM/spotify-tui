@@ -5,13 +5,13 @@ mod config;
 mod event;
 mod handlers;
 mod network;
-mod redirect_uri;
+mod spotify_auth;
 mod ui;
 mod user_config;
 
 use crate::app::RouteId;
 use crate::event::Key;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use app::{ActiveBlock, App};
 use backtrace::Backtrace;
 use banner::BANNER;
@@ -28,11 +28,7 @@ use crossterm::{
   ExecutableCommand,
 };
 use network::{get_spotify, IoEvent, Network};
-use redirect_uri::redirect_uri_web_server;
-use rspotify::{
-  oauth2::{SpotifyOAuth, TokenInfo},
-  util::{process_token, request_token},
-};
+use spotify_auth::authorize_spotify;
 use std::{
   cmp::{max, min},
   io::{self, stdout},
@@ -47,43 +43,6 @@ use tui::{
   Terminal,
 };
 use user_config::{UserConfig, UserConfigPaths};
-
-const SCOPES: [&str; 14] = [
-  "playlist-read-collaborative",
-  "playlist-read-private",
-  "playlist-modify-private",
-  "playlist-modify-public",
-  "user-follow-read",
-  "user-follow-modify",
-  "user-library-modify",
-  "user-library-read",
-  "user-modify-playback-state",
-  "user-read-currently-playing",
-  "user-read-playback-state",
-  "user-read-playback-position",
-  "user-read-private",
-  "user-read-recently-played",
-];
-
-/// get token automatically with local webserver
-pub async fn get_token_auto(spotify_oauth: &mut SpotifyOAuth, port: u16) -> Option<TokenInfo> {
-  match spotify_oauth.get_cached_token().await {
-    Some(token_info) => Some(token_info),
-    None => match redirect_uri_web_server(spotify_oauth, port) {
-      Ok(mut url) => process_token(spotify_oauth, &mut url).await,
-      Err(()) => {
-        println!("Starting webserver failed. Continuing with manual authentication");
-        request_token(spotify_oauth);
-        println!("Enter the URL you were redirected to: ");
-        let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
-          Ok(_) => process_token(spotify_oauth, &mut input).await,
-          Err(_) => None,
-        }
-      }
-    },
-  }
-}
 
 fn close_application() -> Result<()> {
   disable_raw_mode()?;
@@ -206,52 +165,38 @@ of the app. Beware that this comes at a CPU cost!",
   let mut client_config = ClientConfig::new();
   client_config.load_config()?;
 
-  let config_paths = client_config.get_or_build_paths()?;
+  let (oauth, token_info) = authorize_spotify(&client_config)
+    .await
+    .with_context(|| "Failed to authorize spotify")?;
+  let (sync_io_tx, sync_io_rx) = std::sync::mpsc::channel::<IoEvent>();
 
-  // Start authorization with spotify
-  let mut oauth = SpotifyOAuth::default()
-    .client_id(&client_config.client_id)
-    .client_secret(&client_config.client_secret)
-    .redirect_uri(&client_config.get_redirect_uri())
-    .cache_path(config_paths.token_cache_path)
-    .scope(&SCOPES.join(" "))
-    .build();
+  let (spotify, token_expiry) = get_spotify(token_info);
 
-  let config_port = client_config.get_port();
-  match get_token_auto(&mut oauth, config_port).await {
-    Some(token_info) => {
-      let (sync_io_tx, sync_io_rx) = std::sync::mpsc::channel::<IoEvent>();
+  // Initialise app state
+  let app = Arc::new(Mutex::new(App::new(
+    sync_io_tx,
+    user_config.clone(),
+    token_expiry,
+  )));
 
-      let (spotify, token_expiry) = get_spotify(token_info);
-
-      // Initialise app state
-      let app = Arc::new(Mutex::new(App::new(
-        sync_io_tx,
-        user_config.clone(),
-        token_expiry,
-      )));
-
-      // Work with the cli (not really async)
-      if let Some(cmd) = matches.subcommand_name() {
-        // Save, because we checked if the subcommand is present at runtime
-        let m = matches.subcommand_matches(cmd).unwrap();
-        let network = Network::new(oauth, spotify, client_config, &app);
-        println!(
-          "{}",
-          cli::handle_matches(m, cmd.to_string(), network, user_config).await?
-        );
-      // Launch the UI (async)
-      } else {
-        let cloned_app = Arc::clone(&app);
-        std::thread::spawn(move || {
-          let mut network = Network::new(oauth, spotify, client_config, &app);
-          start_tokio(sync_io_rx, &mut network);
-        });
-        // The UI must run in the "main" thread
-        start_ui(user_config, &cloned_app).await?;
-      }
-    }
-    None => println!("\nSpotify auth failed"),
+  // Work with the cli (not really async)
+  if let Some(cmd) = matches.subcommand_name() {
+    // Save, because we checked if the subcommand is present at runtime
+    let m = matches.subcommand_matches(cmd).unwrap();
+    let network = Network::new(oauth, spotify, client_config, &app);
+    println!(
+      "{}",
+      cli::handle_matches(m, cmd.to_string(), network, user_config).await?
+    );
+    // Launch the UI (async)
+  } else {
+    let cloned_app = Arc::clone(&app);
+    std::thread::spawn(move || {
+      let mut network = Network::new(oauth, spotify, client_config, &app);
+      start_tokio(sync_io_rx, &mut network);
+    });
+    // The UI must run in the "main" thread
+    start_ui(user_config, &cloned_app).await?;
   }
 
   Ok(())

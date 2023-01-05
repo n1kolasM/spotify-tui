@@ -5,44 +5,51 @@ use crate::app::{
 };
 use crate::config::ClientConfig;
 use anyhow::anyhow;
+use rspotify::model::UserId;
+use rspotify::prelude::*;
 use rspotify::{
-  client::Spotify,
   model::{
     album::SimplifiedAlbum,
     artist::FullArtist,
-    offset::for_position,
+    enums::{
+      country::Country,
+      misc::{Market, RepeatState},
+      types::{AdditionalType, SearchType},
+    },
+    idtypes::{AlbumId, ArtistId, PlaylistId, ShowId, TrackId},
+    offset::Offset,
     page::Page,
-    playlist::{PlaylistTrack, SimplifiedPlaylist},
+    playlist::{PlaylistItem, SimplifiedPlaylist},
     recommend::Recommendations,
     search::SearchResult,
     show::SimplifiedShow,
     track::FullTrack,
-    PlayingItem,
+    PlayableItem,
   },
-  oauth2::{SpotifyClientCredentials, SpotifyOAuth, TokenInfo},
-  senum::{AdditionalType, Country, RepeatState, SearchType},
-  util::get_token,
+  AuthCodePkceSpotify,
 };
-use serde_json::{map::Map, Value};
 use std::{
   sync::Arc,
-  time::{Duration, Instant, SystemTime},
+  time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
 use tokio::try_join;
 
-#[derive(Debug)]
-pub enum IoEvent {
+pub enum IoEvent<'id> {
   GetCurrentPlayback,
   RefreshAuthentication,
   GetPlaylists,
   GetDevices,
   GetSearchResults(String, Option<Country>),
   SetTracksToTable(Vec<FullTrack>),
-  GetMadeForYouPlaylistTracks(String, u32),
-  GetPlaylistTracks(String, u32),
+  GetMadeForYouPlaylistTracks(PlaylistId<'id>, u32),
+  GetPlaylistTracks(PlaylistId<'id>, u32),
   GetCurrentSavedTracks(Option<u32>),
-  StartPlayback(Option<String>, Option<Vec<String>>, Option<usize>),
+  StartPlayback(
+    Option<PlayContextId<'id>>,
+    Option<Vec<PlayableId<'id>>>,
+    Option<usize>,
+  ),
   UpdateSearchLimits(u32, u32),
   Seek(u32),
   NextTrack,
@@ -51,72 +58,48 @@ pub enum IoEvent {
   Repeat(RepeatState),
   PausePlayback,
   ChangeVolume(u8),
-  GetArtist(String, String, Option<Country>),
+  GetArtist(ArtistId<'id>, String, Option<Country>),
   GetAlbumTracks(Box<SimplifiedAlbum>),
   GetRecommendationsForSeed(
-    Option<Vec<String>>,
-    Option<Vec<String>>,
+    Option<Vec<ArtistId<'id>>>,
+    Option<Vec<TrackId<'id>>>,
     Box<Option<FullTrack>>,
     Option<Country>,
   ),
   GetCurrentUserSavedAlbums(Option<u32>),
-  CurrentUserSavedAlbumsContains(Vec<String>),
-  CurrentUserSavedAlbumDelete(String),
-  CurrentUserSavedAlbumAdd(String),
-  UserUnfollowArtists(Vec<String>),
-  UserFollowArtists(Vec<String>),
-  UserFollowPlaylist(String, String, Option<bool>),
-  UserUnfollowPlaylist(String, String),
+  CurrentUserSavedAlbumsContains(Vec<AlbumId<'id>>),
+  CurrentUserSavedAlbumDelete(AlbumId<'id>),
+  CurrentUserSavedAlbumAdd(AlbumId<'id>),
+  UserUnfollowArtists(Vec<ArtistId<'id>>),
+  UserFollowArtists(Vec<ArtistId<'id>>),
+  UserFollowPlaylist(PlaylistId<'id>, Option<bool>),
+  UserUnfollowPlaylist(PlaylistId<'id>),
   MadeForYouSearchAndAdd(String, Option<Country>),
-  GetAudioAnalysis(String),
+  GetAudioAnalysis(TrackId<'id>),
   GetUser,
-  ToggleSaveTrack(String),
-  GetRecommendationsForTrackId(String, Option<Country>),
+  ToggleSaveTrack(TrackId<'id>),
+  GetRecommendationsForTrackId(TrackId<'id>, Option<Country>),
   GetRecentlyPlayed,
-  GetFollowedArtists(Option<String>),
+  GetFollowedArtists(Option<ArtistId<'id>>),
   SetArtistsToTable(Vec<FullArtist>),
-  UserArtistFollowCheck(Vec<String>),
-  GetAlbum(String),
+  UserArtistFollowCheck(Vec<ArtistId<'id>>),
+  GetAlbum(AlbumId<'id>),
   TransferPlaybackToDevice(String),
-  GetAlbumForTrack(String),
-  CurrentUserSavedTracksContains(Vec<String>),
+  GetAlbumForTrack(TrackId<'id>),
+  CurrentUserSavedTracksContains(Vec<TrackId<'id>>),
   GetCurrentUserSavedShows(Option<u32>),
-  CurrentUserSavedShowsContains(Vec<String>),
-  CurrentUserSavedShowDelete(String),
-  CurrentUserSavedShowAdd(String),
+  CurrentUserSavedShowsContains(Vec<ShowId<'id>>),
+  CurrentUserSavedShowDelete(ShowId<'id>),
+  CurrentUserSavedShowAdd(ShowId<'id>),
   GetShowEpisodes(Box<SimplifiedShow>),
-  GetShow(String),
-  GetCurrentShowEpisodes(String, Option<u32>),
-  AddItemToQueue(String),
-}
-
-pub fn get_spotify(token_info: TokenInfo) -> (Spotify, SystemTime) {
-  let token_expiry = {
-    if let Some(expires_at) = token_info.expires_at {
-      SystemTime::UNIX_EPOCH
-        + Duration::from_secs(expires_at as u64)
-        // Set 10 seconds early
-        - Duration::from_secs(10)
-    } else {
-      SystemTime::now()
-    }
-  };
-
-  let client_credential = SpotifyClientCredentials::default()
-    .token_info(token_info)
-    .build();
-
-  let spotify = Spotify::default()
-    .client_credentials_manager(client_credential)
-    .build();
-
-  (spotify, token_expiry)
+  GetShow(ShowId<'id>),
+  GetCurrentShowEpisodes(ShowId<'id>, Option<u32>),
+  AddItemToQueue(PlayableId<'id>),
 }
 
 #[derive(Clone)]
 pub struct Network<'a> {
-  oauth: SpotifyOAuth,
-  pub spotify: Spotify,
+  pub spotify: AuthCodePkceSpotify,
   large_search_limit: u32,
   small_search_limit: u32,
   pub client_config: ClientConfig,
@@ -125,13 +108,11 @@ pub struct Network<'a> {
 
 impl<'a> Network<'a> {
   pub fn new(
-    oauth: SpotifyOAuth,
-    spotify: Spotify,
+    spotify: AuthCodePkceSpotify,
     client_config: ClientConfig,
     app: &'a Arc<Mutex<App>>,
   ) -> Self {
     Network {
-      oauth,
       spotify,
       large_search_limit: 20,
       small_search_limit: 4,
@@ -141,7 +122,7 @@ impl<'a> Network<'a> {
   }
 
   #[allow(clippy::cognitive_complexity)]
-  pub async fn handle_network_event(&mut self, io_event: IoEvent) {
+  pub async fn handle_network_event(&mut self, io_event: IoEvent<'static>) {
     match io_event {
       IoEvent::RefreshAuthentication => {
         self.refresh_authentication().await;
@@ -229,13 +210,11 @@ impl<'a> Network<'a> {
       IoEvent::UserFollowArtists(artist_ids) => {
         self.user_follow_artists(artist_ids).await;
       }
-      IoEvent::UserFollowPlaylist(playlist_owner_id, playlist_id, is_public) => {
-        self
-          .user_follow_playlist(playlist_owner_id, playlist_id, is_public)
-          .await;
+      IoEvent::UserFollowPlaylist(playlist_id, is_public) => {
+        self.user_follow_playlist(playlist_id, is_public).await;
       }
-      IoEvent::UserUnfollowPlaylist(user_id, playlist_id) => {
-        self.user_unfollow_playlist(user_id, playlist_id).await;
+      IoEvent::UserUnfollowPlaylist(playlist_id) => {
+        self.user_unfollow_playlist(playlist_id).await;
       }
       IoEvent::MadeForYouSearchAndAdd(search_term, country) => {
         self.made_for_you_search_and_add(search_term, country).await;
@@ -326,11 +305,11 @@ impl<'a> Network<'a> {
   }
 
   async fn get_devices(&mut self) {
-    if let Ok(result) = self.spotify.device().await {
+    if let Ok(devices) = self.spotify.device().await {
       let mut app = self.app.lock().await;
       app.push_navigation_stack(RouteId::SelectedDevice, ActiveBlock::SelectDevice);
-      if !result.devices.is_empty() {
-        app.devices = Some(result);
+      if !devices.is_empty() {
+        app.devices = Some(devices);
         // Select the first device in the list
         app.selected_device_index = Some(0);
       }
@@ -342,7 +321,7 @@ impl<'a> Network<'a> {
       .spotify
       .current_playback(
         None,
-        Some(vec![AdditionalType::Episode, AdditionalType::Track]),
+        Some(vec![&AdditionalType::Episode, &AdditionalType::Track]),
       )
       .await;
 
@@ -354,12 +333,12 @@ impl<'a> Network<'a> {
 
         if let Some(item) = c.item {
           match item {
-            PlayingItem::Track(track) => {
+            PlayableItem::Track(track) => {
               if let Some(track_id) = track.id {
                 app.dispatch(IoEvent::CurrentUserSavedTracksContains(vec![track_id]));
               };
             }
-            PlayingItem::Episode(_episode) => { /*should map this to following the podcast show*/ }
+            PlayableItem::Episode(_episode) => { /*should map this to following the podcast show*/ }
           }
         };
       }
@@ -377,14 +356,18 @@ impl<'a> Network<'a> {
     app.is_fetching_current_playback = false;
   }
 
-  async fn current_user_saved_tracks_contains(&mut self, ids: Vec<String>) {
-    match self.spotify.current_user_saved_tracks_contains(&ids).await {
+  async fn current_user_saved_tracks_contains(&mut self, ids: Vec<TrackId<'static>>) {
+    match self
+      .spotify
+      .current_user_saved_tracks_contains(ids.iter().cloned())
+      .await
+    {
       Ok(is_saved_vec) => {
         let mut app = self.app.lock().await;
         for (i, id) in ids.iter().enumerate() {
           if let Some(is_liked) = is_saved_vec.get(i) {
             if *is_liked {
-              app.liked_song_ids_set.insert(id.to_string());
+              app.liked_song_ids_set.insert(id.clone_static());
             } else {
               // The song is not liked, so check if it should be removed
               if app.liked_song_ids_set.contains(id) {
@@ -400,16 +383,15 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn get_playlist_tracks(&mut self, playlist_id: String, playlist_offset: u32) {
+  async fn get_playlist_tracks<'id>(&mut self, playlist_id: PlaylistId<'id>, playlist_offset: u32) {
     if let Ok(playlist_tracks) = self
       .spotify
-      .user_playlist_tracks(
-        "spotify",
-        &playlist_id,
+      .playlist_items_manual(
+        playlist_id,
+        None,
         None,
         Some(self.large_search_limit),
         Some(playlist_offset),
-        None,
       )
       .await
     {
@@ -421,14 +403,17 @@ impl<'a> Network<'a> {
     };
   }
 
-  async fn set_playlist_tracks_to_table(&mut self, playlist_track_page: &Page<PlaylistTrack>) {
+  async fn set_playlist_tracks_to_table(&mut self, playlist_track_page: &Page<PlaylistItem>) {
     self
       .set_tracks_to_table(
         playlist_track_page
           .items
           .clone()
           .into_iter()
-          .filter_map(|item| item.track)
+          .filter_map(|item| match item.track {
+            Some(PlayableItem::Track(track)) => Some(track),
+            _ => None,
+          })
           .collect::<Vec<FullTrack>>(),
       )
       .await;
@@ -443,7 +428,7 @@ impl<'a> Network<'a> {
       tracks
         .into_iter()
         .filter_map(|item| item.id)
-        .collect::<Vec<String>>(),
+        .collect::<Vec<TrackId>>(),
     ));
   }
 
@@ -452,20 +437,19 @@ impl<'a> Network<'a> {
     app.artists = artists;
   }
 
-  async fn get_made_for_you_playlist_tracks(
+  async fn get_made_for_you_playlist_tracks<'id>(
     &mut self,
-    playlist_id: String,
+    playlist_id: PlaylistId<'id>,
     made_for_you_offset: u32,
   ) {
     if let Ok(made_for_you_tracks) = self
       .spotify
-      .user_playlist_tracks(
-        "spotify",
-        &playlist_id,
+      .playlist_items_manual(
+        playlist_id,
+        None,
         None,
         Some(self.large_search_limit),
         Some(made_for_you_offset),
-        None,
       )
       .await
     {
@@ -484,7 +468,7 @@ impl<'a> Network<'a> {
   async fn get_current_user_saved_shows(&mut self, offset: Option<u32>) {
     match self
       .spotify
-      .get_saved_show(self.large_search_limit, offset)
+      .get_saved_show_manual(Some(self.large_search_limit), offset)
       .await
     {
       Ok(saved_shows) => {
@@ -500,18 +484,18 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn current_user_saved_shows_contains(&mut self, show_ids: Vec<String>) {
+  async fn current_user_saved_shows_contains<'id>(&mut self, show_ids: Vec<ShowId<'id>>) {
     if let Ok(are_followed) = self
       .spotify
-      .check_users_saved_shows(show_ids.to_owned())
+      .check_users_saved_shows(show_ids.iter().cloned())
       .await
     {
       let mut app = self.app.lock().await;
-      show_ids.iter().enumerate().for_each(|(i, id)| {
+      show_ids.into_iter().enumerate().for_each(|(i, id)| {
         if are_followed[i] {
-          app.saved_show_ids_set.insert(id.to_owned());
+          app.saved_show_ids_set.insert(id.into_static());
         } else {
-          app.saved_show_ids_set.remove(id);
+          app.saved_show_ids_set.remove(&id.into_static());
         }
       })
     }
@@ -520,7 +504,12 @@ impl<'a> Network<'a> {
   async fn get_show_episodes(&mut self, show: Box<SimplifiedShow>) {
     match self
       .spotify
-      .get_shows_episodes(show.id.clone(), self.large_search_limit, 0, None)
+      .get_shows_episodes_manual(
+        show.id.clone(),
+        None,
+        Some(self.large_search_limit),
+        Some(0),
+      )
       .await
     {
       Ok(episodes) => {
@@ -542,7 +531,7 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn get_show(&mut self, show_id: String) {
+  async fn get_show<'id>(&mut self, show_id: ShowId<'id>) {
     match self.spotify.get_a_show(show_id, None).await {
       Ok(show) => {
         let selected_show = SelectedFullShow { show };
@@ -560,10 +549,10 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn get_current_show_episodes(&mut self, show_id: String, offset: Option<u32>) {
+  async fn get_current_show_episodes<'id>(&mut self, show_id: ShowId<'id>, offset: Option<u32>) {
     match self
       .spotify
-      .get_shows_episodes(show_id, self.large_search_limit, offset, None)
+      .get_shows_episodes_manual(show_id, None, Some(self.large_search_limit), offset)
       .await
     {
       Ok(episodes) => {
@@ -579,49 +568,50 @@ impl<'a> Network<'a> {
   }
 
   async fn get_search_results(&mut self, search_term: String, country: Option<Country>) {
+    let market = country.map(Market::Country);
     let search_track = self.spotify.search(
       &search_term,
       SearchType::Track,
-      self.small_search_limit,
-      0,
-      country,
+      market,
       None,
+      Some(self.small_search_limit),
+      Some(0),
     );
 
     let search_artist = self.spotify.search(
       &search_term,
       SearchType::Artist,
-      self.small_search_limit,
-      0,
-      country,
+      market,
       None,
+      Some(self.small_search_limit),
+      Some(0),
     );
 
     let search_album = self.spotify.search(
       &search_term,
       SearchType::Album,
-      self.small_search_limit,
-      0,
-      country,
+      market,
       None,
+      Some(self.small_search_limit),
+      Some(0),
     );
 
     let search_playlist = self.spotify.search(
       &search_term,
       SearchType::Playlist,
-      self.small_search_limit,
-      0,
-      country,
+      market,
       None,
+      Some(self.small_search_limit),
+      Some(0),
     );
 
     let search_show = self.spotify.search(
       &search_term,
       SearchType::Show,
-      self.small_search_limit,
-      0,
-      country,
+      market,
       None,
+      Some(self.small_search_limit),
+      Some(0),
     );
 
     // Run the futures concurrently
@@ -641,10 +631,10 @@ impl<'a> Network<'a> {
       )) => {
         let mut app = self.app.lock().await;
 
-        let artist_ids = album_results
+        let artist_ids = artist_results
           .items
           .iter()
-          .filter_map(|item| item.id.to_owned())
+          .map(|artist| artist.id.clone_static())
           .collect();
 
         // Check if these artists are followed
@@ -684,7 +674,7 @@ impl<'a> Network<'a> {
   async fn get_current_user_saved_tracks(&mut self, offset: Option<u32>) {
     match self
       .spotify
-      .current_user_saved_tracks(self.large_search_limit, offset)
+      .current_user_saved_tracks_manual(None, Some(self.large_search_limit), offset)
       .await
     {
       Ok(saved_tracks) => {
@@ -698,7 +688,7 @@ impl<'a> Network<'a> {
 
         saved_tracks.items.iter().for_each(|item| {
           if let Some(track_id) = &item.track.id {
-            app.liked_song_ids_set.insert(track_id.to_string());
+            app.liked_song_ids_set.insert(track_id.clone_static());
           }
         });
 
@@ -711,40 +701,29 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn start_playback(
+  async fn start_playback<'id>(
     &mut self,
-    context_uri: Option<String>,
-    uris: Option<Vec<String>>,
+    context_uri: Option<PlayContextId<'id>>,
+    uris: Option<Vec<PlayableId<'id>>>,
     offset: Option<usize>,
   ) {
-    let (uris, context_uri) = if context_uri.is_some() {
-      (None, context_uri)
-    } else if uris.is_some() {
-      (uris, None)
-    } else {
-      (None, None)
-    };
+    let offset = offset.map(|o| Offset::Position(o as u32));
 
-    let offset = offset.and_then(|o| for_position(o as u32));
-
-    let result = match &self.client_config.device_id {
-      Some(device_id) => {
-        match self
+    let device_id = self.client_config.device_id.as_deref();
+    let result = match (context_uri, uris) {
+      (Some(context_uri), _) => {
+        self
           .spotify
-          .start_playback(
-            Some(device_id.to_string()),
-            context_uri.clone(),
-            uris.clone(),
-            offset.clone(),
-            None,
-          )
+          .start_context_playback(context_uri, device_id, offset, None)
           .await
-        {
-          Ok(()) => Ok(()),
-          Err(e) => Err(anyhow!(e)),
-        }
       }
-      None => Err(anyhow!("No device_id selected")),
+      (_, Some(uris)) => {
+        self
+          .spotify
+          .start_uris_playback(uris, device_id, offset, None)
+          .await
+      }
+      _ => self.spotify.resume_playback(device_id, None).await,
     };
 
     match result {
@@ -754,22 +733,18 @@ impl<'a> Network<'a> {
         app.dispatch(IoEvent::GetCurrentPlayback);
       }
       Err(e) => {
-        self.handle_error(e).await;
+        self.handle_error(anyhow!(e)).await;
       }
     }
   }
 
   async fn seek(&mut self, position_ms: u32) {
     if let Some(device_id) = &self.client_config.device_id {
-      match self
-        .spotify
-        .seek_track(position_ms, Some(device_id.to_string()))
-        .await
-      {
+      match self.spotify.seek_track(position_ms, Some(device_id)).await {
         Ok(()) => {
           // Wait between seek and status query.
           // Without it, the Spotify API may return the old progress.
-          tokio::time::delay_for(Duration::from_millis(1000)).await;
+          tokio::time::sleep(Duration::from_millis(1000)).await;
           self.get_current_playback().await;
         }
         Err(e) => {
@@ -782,7 +757,7 @@ impl<'a> Network<'a> {
   async fn next_track(&mut self) {
     match self
       .spotify
-      .next_track(self.client_config.device_id.clone())
+      .next_track(self.client_config.device_id.as_deref())
       .await
     {
       Ok(()) => {
@@ -797,7 +772,7 @@ impl<'a> Network<'a> {
   async fn previous_track(&mut self) {
     match self
       .spotify
-      .previous_track(self.client_config.device_id.clone())
+      .previous_track(self.client_config.device_id.as_deref())
       .await
     {
       Ok(()) => {
@@ -812,7 +787,7 @@ impl<'a> Network<'a> {
   async fn shuffle(&mut self, shuffle_state: bool) {
     match self
       .spotify
-      .shuffle(!shuffle_state, self.client_config.device_id.clone())
+      .shuffle(!shuffle_state, self.client_config.device_id.as_deref())
       .await
     {
       Ok(()) => {
@@ -837,7 +812,7 @@ impl<'a> Network<'a> {
     };
     match self
       .spotify
-      .repeat(next_repeat_state, self.client_config.device_id.clone())
+      .repeat(next_repeat_state, self.client_config.device_id.as_deref())
       .await
     {
       Ok(()) => {
@@ -855,7 +830,7 @@ impl<'a> Network<'a> {
   async fn pause_playback(&mut self) {
     match self
       .spotify
-      .pause_playback(self.client_config.device_id.clone())
+      .pause_playback(self.client_config.device_id.as_deref())
       .await
     {
       Ok(()) => {
@@ -870,13 +845,13 @@ impl<'a> Network<'a> {
   async fn change_volume(&mut self, volume_percent: u8) {
     match self
       .spotify
-      .volume(volume_percent, self.client_config.device_id.clone())
+      .volume(volume_percent, self.client_config.device_id.as_deref())
       .await
     {
       Ok(()) => {
         let mut app = self.app.lock().await;
         if let Some(current_playback_context) = &mut app.current_playback_context {
-          current_playback_context.device.volume_percent = volume_percent.into();
+          current_playback_context.device.volume_percent = Some(volume_percent.into());
         };
       }
       Err(e) => {
@@ -885,31 +860,34 @@ impl<'a> Network<'a> {
     };
   }
 
-  async fn get_artist(
+  async fn get_artist<'id>(
     &mut self,
-    artist_id: String,
+    artist_id: ArtistId<'id>,
     input_artist_name: String,
     country: Option<Country>,
   ) {
-    let albums = self.spotify.artist_albums(
-      &artist_id,
+    let market = country.map(Market::Country);
+    let albums = self.spotify.artist_albums_manual(
+      artist_id.clone(),
       None,
-      country,
+      market.clone(),
       Some(self.large_search_limit),
       Some(0),
     );
     let artist_name = if input_artist_name.is_empty() {
       self
         .spotify
-        .artist(&artist_id)
+        .artist(artist_id.clone())
         .await
         .map(|full_artist| full_artist.name)
         .unwrap_or_default()
     } else {
       input_artist_name
     };
-    let top_tracks = self.spotify.artist_top_tracks(&artist_id, country);
-    let related_artist = self.spotify.artist_related_artists(&artist_id);
+    let top_tracks = self
+      .spotify
+      .artist_top_tracks(artist_id.clone(), market.unwrap_or(Market::FromToken));
+    let related_artist = self.spotify.artist_related_artists(artist_id.clone());
 
     if let Ok((albums, top_tracks, related_artist)) = try_join!(albums, top_tracks, related_artist)
     {
@@ -926,8 +904,8 @@ impl<'a> Network<'a> {
       app.artist = Some(Artist {
         artist_name,
         albums,
-        related_artists: related_artist.artists,
-        top_tracks: top_tracks.tracks,
+        related_artists: related_artist,
+        top_tracks,
         selected_album_index: 0,
         selected_related_artist_index: 0,
         selected_top_track_index: 0,
@@ -941,7 +919,7 @@ impl<'a> Network<'a> {
     if let Some(album_id) = &album.id {
       match self
         .spotify
-        .album_track(&album_id.clone(), self.large_search_limit, 0)
+        .album_track_manual(album_id.clone(), Some(self.large_search_limit), Some(0))
         .await
       {
         Ok(tracks) => {
@@ -949,7 +927,7 @@ impl<'a> Network<'a> {
             .items
             .iter()
             .filter_map(|item| item.id.clone())
-            .collect::<Vec<String>>();
+            .collect::<Vec<TrackId>>();
 
           let mut app = self.app.lock().await;
           app.selected_album_simplified = Some(SelectedAlbum {
@@ -969,24 +947,22 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn get_recommendations_for_seed(
+  async fn get_recommendations_for_seed<'id>(
     &mut self,
-    seed_artists: Option<Vec<String>>,
-    seed_tracks: Option<Vec<String>>,
+    seed_artists: Option<Vec<ArtistId<'id>>>,
+    seed_tracks: Option<Vec<TrackId<'id>>>,
     first_track: Box<Option<FullTrack>>,
     country: Option<Country>,
   ) {
-    let empty_payload: Map<String, Value> = Map::new();
-
     match self
       .spotify
       .recommendations(
-        seed_artists,            // artists
-        None,                    // genres
-        seed_tracks,             // tracks
-        self.large_search_limit, // adjust playlist to screen size
-        country,                 // country
-        &empty_payload,          // payload
+        Vec::new(),                    // attributes
+        seed_artists,                  // artists
+        Option::<Vec<&str>>::None,     // genres
+        seed_tracks,                   // tracks
+        country.map(Market::Country),  // country
+        Some(self.large_search_limit), // adjust playlist to screen size
       )
       .await
     {
@@ -999,8 +975,9 @@ impl<'a> Network<'a> {
 
           let track_ids = recommended_tracks
             .iter()
-            .map(|x| x.uri.clone())
-            .collect::<Vec<String>>();
+            .filter_map(|x| x.id.to_owned())
+            .map(PlayableId::Track)
+            .collect::<Vec<PlayableId>>();
 
           self.set_tracks_to_table(recommended_tracks.clone()).await;
 
@@ -1029,44 +1006,40 @@ impl<'a> Network<'a> {
       .clone()
       .tracks
       .into_iter()
-      .map(|item| item.uri)
-      .collect::<Vec<String>>();
-    if let Ok(result) = self
-      .spotify
-      .tracks(tracks.iter().map(|x| &x[..]).collect::<Vec<&str>>(), None)
-      .await
-    {
-      return Some(result.tracks);
-    }
-
-    None
+      .filter_map(|item| item.id.to_owned())
+      .collect::<Vec<TrackId>>();
+    self.spotify.tracks(tracks, None).await.ok()
   }
 
-  async fn get_recommendations_for_track_id(&mut self, id: String, country: Option<Country>) {
-    if let Ok(track) = self.spotify.track(&id).await {
-      let track_id_list = track.id.as_ref().map(|id| vec![id.to_string()]);
+  async fn get_recommendations_for_track_id<'id>(
+    &mut self,
+    id: TrackId<'id>,
+    country: Option<Country>,
+  ) {
+    if let Ok(track) = self.spotify.track(id).await {
+      let track_id_list = track.id.as_ref().map(|id| vec![id.clone()]);
       self
         .get_recommendations_for_seed(None, track_id_list, Box::new(Some(track)), country)
         .await;
     }
   }
 
-  async fn toggle_save_track(&mut self, track_id: String) {
+  async fn toggle_save_track<'id>(&mut self, track_id: TrackId<'id>) {
     match self
       .spotify
-      .current_user_saved_tracks_contains(&[track_id.clone()])
+      .current_user_saved_tracks_contains(std::iter::once(track_id.clone()))
       .await
     {
       Ok(saved) => {
         if saved.first() == Some(&true) {
           match self
             .spotify
-            .current_user_saved_tracks_delete(&[track_id.clone()])
+            .current_user_saved_tracks_delete(std::iter::once(track_id.clone()))
             .await
           {
             Ok(()) => {
               let mut app = self.app.lock().await;
-              app.liked_song_ids_set.remove(&track_id);
+              app.liked_song_ids_set.remove(&track_id.into_static());
             }
             Err(e) => {
               self.handle_error(anyhow!(e)).await;
@@ -1075,13 +1048,13 @@ impl<'a> Network<'a> {
         } else {
           match self
             .spotify
-            .current_user_saved_tracks_add(&[track_id.clone()])
+            .current_user_saved_tracks_add(std::iter::once(track_id.clone()))
             .await
           {
             Ok(()) => {
               // TODO: This should ideally use the same logic as `self.current_user_saved_tracks_contains`
               let mut app = self.app.lock().await;
-              app.liked_song_ids_set.insert(track_id);
+              app.liked_song_ids_set.insert(track_id.clone_static());
             }
             Err(e) => {
               self.handle_error(anyhow!(e)).await;
@@ -1095,16 +1068,17 @@ impl<'a> Network<'a> {
     };
   }
 
-  async fn get_followed_artists(&mut self, after: Option<String>) {
+  async fn get_followed_artists<'id>(&mut self, after: Option<ArtistId<'id>>) {
+    let after = after.map(|after| after.id().to_owned());
     match self
       .spotify
-      .current_user_followed_artists(self.large_search_limit, after)
+      .current_user_followed_artists(after.as_deref(), Some(self.large_search_limit))
       .await
     {
       Ok(saved_artists) => {
         let mut app = self.app.lock().await;
-        app.artists = saved_artists.artists.items.to_owned();
-        app.library.saved_artists.add_pages(saved_artists.artists);
+        app.artists = saved_artists.items.to_owned();
+        app.library.saved_artists.add_pages(saved_artists);
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -1112,14 +1086,18 @@ impl<'a> Network<'a> {
     };
   }
 
-  async fn user_artist_check_follow(&mut self, artist_ids: Vec<String>) {
-    if let Ok(are_followed) = self.spotify.user_artist_check_follow(&artist_ids).await {
+  async fn user_artist_check_follow<'id>(&mut self, artist_ids: Vec<ArtistId<'id>>) {
+    if let Ok(are_followed) = self
+      .spotify
+      .user_artist_check_follow(artist_ids.iter().cloned())
+      .await
+    {
       let mut app = self.app.lock().await;
-      artist_ids.iter().enumerate().for_each(|(i, id)| {
+      artist_ids.into_iter().enumerate().for_each(|(i, id)| {
         if are_followed[i] {
-          app.followed_artist_ids_set.insert(id.to_owned());
+          app.followed_artist_ids_set.insert(id.into_static());
         } else {
-          app.followed_artist_ids_set.remove(id);
+          app.followed_artist_ids_set.remove(&id.into_static());
         }
       });
     }
@@ -1128,7 +1106,7 @@ impl<'a> Network<'a> {
   async fn get_current_user_saved_albums(&mut self, offset: Option<u32>) {
     match self
       .spotify
-      .current_user_saved_albums(self.large_search_limit, offset)
+      .current_user_saved_albums_manual(None, Some(self.large_search_limit), offset)
       .await
     {
       Ok(saved_albums) => {
@@ -1144,33 +1122,33 @@ impl<'a> Network<'a> {
     };
   }
 
-  async fn current_user_saved_albums_contains(&mut self, album_ids: Vec<String>) {
+  async fn current_user_saved_albums_contains<'id>(&mut self, album_ids: Vec<AlbumId<'id>>) {
     if let Ok(are_followed) = self
       .spotify
-      .current_user_saved_albums_contains(&album_ids)
+      .current_user_saved_albums_contains(album_ids.iter().cloned())
       .await
     {
       let mut app = self.app.lock().await;
-      album_ids.iter().enumerate().for_each(|(i, id)| {
+      album_ids.into_iter().enumerate().for_each(|(i, id)| {
         if are_followed[i] {
-          app.saved_album_ids_set.insert(id.to_owned());
+          app.saved_album_ids_set.insert(id.into_static());
         } else {
-          app.saved_album_ids_set.remove(id);
+          app.saved_album_ids_set.remove(&id.into_static());
         }
       });
     }
   }
 
-  pub async fn current_user_saved_album_delete(&mut self, album_id: String) {
+  pub async fn current_user_saved_album_delete<'id>(&mut self, album_id: AlbumId<'id>) {
     match self
       .spotify
-      .current_user_saved_albums_delete(&[album_id.to_owned()])
+      .current_user_saved_albums_delete(std::iter::once(album_id.clone()))
       .await
     {
       Ok(_) => {
         self.get_current_user_saved_albums(None).await;
         let mut app = self.app.lock().await;
-        app.saved_album_ids_set.remove(&album_id.to_owned());
+        app.saved_album_ids_set.remove(&album_id.into_static());
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -1178,30 +1156,30 @@ impl<'a> Network<'a> {
     };
   }
 
-  async fn current_user_saved_album_add(&mut self, album_id: String) {
+  async fn current_user_saved_album_add<'id>(&mut self, album_id: AlbumId<'id>) {
     match self
       .spotify
-      .current_user_saved_albums_add(&[album_id.to_owned()])
+      .current_user_saved_albums_add(std::iter::once(album_id.clone()))
       .await
     {
       Ok(_) => {
         let mut app = self.app.lock().await;
-        app.saved_album_ids_set.insert(album_id.to_owned());
+        app.saved_album_ids_set.insert(album_id.into_static());
       }
       Err(e) => self.handle_error(anyhow!(e)).await,
     }
   }
 
-  async fn current_user_saved_shows_delete(&mut self, show_id: String) {
+  async fn current_user_saved_shows_delete<'id>(&mut self, show_id: ShowId<'id>) {
     match self
       .spotify
-      .remove_users_saved_shows(vec![show_id.to_owned()], None)
+      .remove_users_saved_shows(std::iter::once(show_id.clone()), None)
       .await
     {
       Ok(_) => {
         self.get_current_user_saved_shows(None).await;
         let mut app = self.app.lock().await;
-        app.saved_show_ids_set.remove(&show_id.to_owned());
+        app.saved_show_ids_set.remove(&show_id.into_static());
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -1209,12 +1187,16 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn current_user_saved_shows_add(&mut self, show_id: String) {
-    match self.spotify.save_shows(vec![show_id.to_owned()]).await {
+  async fn current_user_saved_shows_add<'id>(&mut self, show_id: ShowId<'id>) {
+    match self
+      .spotify
+      .save_shows(std::iter::once(show_id.clone()))
+      .await
+    {
       Ok(_) => {
         self.get_current_user_saved_shows(None).await;
         let mut app = self.app.lock().await;
-        app.saved_show_ids_set.insert(show_id.to_owned());
+        app.saved_show_ids_set.insert(show_id.clone_static());
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -1222,13 +1204,17 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn user_unfollow_artists(&mut self, artist_ids: Vec<String>) {
-    match self.spotify.user_unfollow_artists(&artist_ids).await {
+  async fn user_unfollow_artists<'id>(&mut self, artist_ids: Vec<ArtistId<'id>>) {
+    match self
+      .spotify
+      .user_unfollow_artists(artist_ids.iter().cloned())
+      .await
+    {
       Ok(_) => {
         self.get_followed_artists(None).await;
         let mut app = self.app.lock().await;
-        artist_ids.iter().for_each(|id| {
-          app.followed_artist_ids_set.remove(&id.to_owned());
+        artist_ids.into_iter().for_each(|id| {
+          app.followed_artist_ids_set.remove(&id.into_static());
         });
       }
       Err(e) => {
@@ -1237,13 +1223,17 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn user_follow_artists(&mut self, artist_ids: Vec<String>) {
-    match self.spotify.user_follow_artists(&artist_ids).await {
+  async fn user_follow_artists<'id>(&mut self, artist_ids: Vec<ArtistId<'id>>) {
+    match self
+      .spotify
+      .user_follow_artists(artist_ids.iter().cloned())
+      .await
+    {
       Ok(_) => {
         self.get_followed_artists(None).await;
         let mut app = self.app.lock().await;
-        artist_ids.iter().for_each(|id| {
-          app.followed_artist_ids_set.insert(id.to_owned());
+        artist_ids.into_iter().for_each(|id| {
+          app.followed_artist_ids_set.insert(id.into_static());
         });
       }
       Err(e) => {
@@ -1252,17 +1242,12 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn user_follow_playlist(
+  async fn user_follow_playlist<'id>(
     &mut self,
-    playlist_owner_id: String,
-    playlist_id: String,
+    playlist_id: PlaylistId<'id>,
     is_public: Option<bool>,
   ) {
-    match self
-      .spotify
-      .user_playlist_follow_playlist(&playlist_owner_id, &playlist_id, is_public)
-      .await
-    {
+    match self.spotify.playlist_follow(playlist_id, is_public).await {
       Ok(_) => {
         self.get_current_user_playlists().await;
       }
@@ -1272,12 +1257,8 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn user_unfollow_playlist(&mut self, user_id: String, playlist_id: String) {
-    match self
-      .spotify
-      .user_playlist_unfollow(&user_id, &playlist_id)
-      .await
-    {
+  async fn user_unfollow_playlist<'id>(&mut self, playlist_id: PlaylistId<'id>) {
+    match self.spotify.playlist_unfollow(playlist_id).await {
       Ok(_) => {
         self.get_current_user_playlists().await;
       }
@@ -1289,16 +1270,17 @@ impl<'a> Network<'a> {
 
   async fn made_for_you_search_and_add(&mut self, search_string: String, country: Option<Country>) {
     const SPOTIFY_ID: &str = "spotify";
+    let spotify_id = UserId::from_id(SPOTIFY_ID).unwrap();
 
     match self
       .spotify
       .search(
         &search_string,
         SearchType::Playlist,
-        self.large_search_limit,
-        0,
-        country,
+        country.map(Market::Country),
         None,
+        Some(self.large_search_limit),
+        Some(0),
       )
       .await
     {
@@ -1306,7 +1288,7 @@ impl<'a> Network<'a> {
         let mut filtered_playlists = search_playlists
           .items
           .iter()
-          .filter(|playlist| playlist.owner.id == SPOTIFY_ID && playlist.name == search_string)
+          .filter(|playlist| playlist.owner.id == spotify_id && playlist.name == search_string)
           .map(|playlist| playlist.to_owned())
           .collect::<Vec<SimplifiedPlaylist>>();
 
@@ -1334,8 +1316,8 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn get_audio_analysis(&mut self, uri: String) {
-    match self.spotify.audio_analysis(&uri).await {
+  async fn get_audio_analysis<'id>(&mut self, track_id: TrackId<'id>) {
+    match self.spotify.track_analysis(track_id).await {
       Ok(result) => {
         let mut app = self.app.lock().await;
         app.audio_analysis = Some(result);
@@ -1349,7 +1331,7 @@ impl<'a> Network<'a> {
   async fn get_current_user_playlists(&mut self) {
     let playlists = self
       .spotify
-      .current_user_playlists(self.large_search_limit, None)
+      .current_user_playlists_manual(Some(self.large_search_limit), None)
       .await;
 
     match playlists {
@@ -1368,7 +1350,7 @@ impl<'a> Network<'a> {
   async fn get_recently_played(&mut self) {
     match self
       .spotify
-      .current_user_recently_played(self.large_search_limit)
+      .current_user_recently_played(Some(self.large_search_limit), None)
       .await
     {
       Ok(result) => {
@@ -1376,7 +1358,7 @@ impl<'a> Network<'a> {
           .items
           .iter()
           .filter_map(|item| item.track.id.clone())
-          .collect::<Vec<String>>();
+          .collect::<Vec<TrackId<'_>>>();
 
         self.current_user_saved_tracks_contains(track_ids).await;
 
@@ -1390,8 +1372,8 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn get_album(&mut self, album_id: String) {
-    match self.spotify.album(&album_id).await {
+  async fn get_album<'id>(&mut self, album_id: AlbumId<'id>) {
+    match self.spotify.album(album_id).await {
       Ok(album) => {
         let selected_album = SelectedFullAlbum {
           album,
@@ -1410,8 +1392,8 @@ impl<'a> Network<'a> {
     }
   }
 
-  async fn get_album_for_track(&mut self, track_id: String) {
-    match self.spotify.track(&track_id).await {
+  async fn get_album_for_track<'id>(&mut self, track_id: TrackId<'id>) {
+    match self.spotify.track(track_id).await {
       Ok(track) => {
         // It is unclear when the id can ever be None, but perhaps a track can be album-less. If
         // so, there isn't much to do here anyways, since we're looking for the parent album.
@@ -1420,7 +1402,7 @@ impl<'a> Network<'a> {
           None => return,
         };
 
-        if let Ok(album) = self.spotify.album(&album_id).await {
+        if let Ok(album) = self.spotify.album(album_id).await {
           // The way we map to the UI is zero-indexed, but Spotify is 1-indexed.
           let zero_indexed_track_number = track.track_number - 1;
           let selected_album = SelectedFullAlbum {
@@ -1444,7 +1426,7 @@ impl<'a> Network<'a> {
   }
 
   async fn transfert_playback_to_device(&mut self, device_id: String) {
-    match self.spotify.transfer_playback(&device_id, true).await {
+    match self.spotify.transfer_playback(&device_id, Some(true)).await {
       Ok(()) => {
         self.get_current_playback().await;
       }
@@ -1466,21 +1448,15 @@ impl<'a> Network<'a> {
   }
 
   async fn refresh_authentication(&mut self) {
-    if let Some(new_token_info) = get_token(&mut self.oauth).await {
-      let (new_spotify, new_token_expiry) = get_spotify(new_token_info);
-      self.spotify = new_spotify;
-      let mut app = self.app.lock().await;
-      app.spotify_token_expiry = new_token_expiry;
-    } else {
-      println!("\nFailed to refresh authentication token");
-      // TODO panic!
+    if let Err(err) = self.spotify.auto_reauth().await {
+      println!("\nFailed to refresh authentication token: {}", err);
     }
   }
 
-  async fn add_item_to_queue(&mut self, item: String) {
+  async fn add_item_to_queue<'id>(&mut self, item: PlayableId<'id>) {
     match self
       .spotify
-      .add_item_to_queue(item, self.client_config.device_id.clone())
+      .add_item_to_queue(item, self.client_config.device_id.as_deref())
       .await
     {
       Ok(()) => (),

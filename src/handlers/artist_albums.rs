@@ -31,7 +31,6 @@ pub fn handler(key: Key, app: &mut App) {
                     .albums
                     .items
                     .get(artist_albums.selected_index)
-                    .cloned()
                 {
                     app.track_table.context = Some(TrackTableContext::AlbumSearch);
                     app.get_album_tracks(selected_album);

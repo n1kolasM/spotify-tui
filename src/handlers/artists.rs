@@ -1,3 +1,5 @@
+use rspotify::{prelude::PlayContextId, model::ArtistId};
+
 use super::common_key_events;
 use crate::{
   app::{ActiveBlock, App, RecommendationsContext, RouteId},
@@ -50,22 +52,22 @@ pub fn handler(key: Key, app: &mut App) {
     }
     Key::Char('D') => app.user_unfollow_artists(ActiveBlock::AlbumList),
     Key::Char('e') => {
-      let artists = app.artists.to_owned();
+      let artists = &app.artists;
       let artist = artists.get(app.artists_list_index);
       if let Some(artist) = artist {
         app.dispatch(IoEvent::StartPlayback(
-          Some(artist.uri.to_owned()),
+          Some(PlayContextId::Artist(artist.id.clone_static())),
           None,
           None,
         ));
       }
     }
     Key::Char('r') => {
-      let artists = app.artists.to_owned();
+      let artists = &app.artists;
       let artist = artists.get(app.artists_list_index);
       if let Some(artist) = artist {
         let artist_name = artist.name.clone();
-        let artist_id_list: Option<Vec<String>> = Some(vec![artist.id.clone()]);
+        let artist_id_list: Option<Vec<ArtistId<'static>>> = Some(vec![artist.id.clone_static()]);
 
         app.recommendations_context = Some(RecommendationsContext::Artist);
         app.recommendations_seed = artist_name;

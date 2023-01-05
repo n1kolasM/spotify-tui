@@ -15,7 +15,7 @@ pub fn handler(key: Key, app: &mut App) {
         Some(p) => {
           if let Some(selected_device_index) = app.selected_device_index {
             let next_index =
-              common_key_events::on_down_press_handler(&p.devices, Some(selected_device_index));
+              common_key_events::on_down_press_handler(&p, Some(selected_device_index));
             app.selected_device_index = Some(next_index);
           }
         }
@@ -27,7 +27,7 @@ pub fn handler(key: Key, app: &mut App) {
         Some(p) => {
           if let Some(selected_device_index) = app.selected_device_index {
             let next_index =
-              common_key_events::on_up_press_handler(&p.devices, Some(selected_device_index));
+              common_key_events::on_up_press_handler(&p, Some(selected_device_index));
             app.selected_device_index = Some(next_index);
           }
         }
@@ -49,7 +49,7 @@ pub fn handler(key: Key, app: &mut App) {
       match &app.devices {
         Some(p) => {
           if let Some(_selected_device_index) = app.selected_device_index {
-            let next_index = common_key_events::on_middle_press_handler(&p.devices);
+            let next_index = common_key_events::on_middle_press_handler(&p);
             app.selected_device_index = Some(next_index);
           }
         }
@@ -60,7 +60,7 @@ pub fn handler(key: Key, app: &mut App) {
       match &app.devices {
         Some(p) => {
           if let Some(_selected_device_index) = app.selected_device_index {
-            let next_index = common_key_events::on_low_press_handler(&p.devices);
+            let next_index = common_key_events::on_low_press_handler(&p);
             app.selected_device_index = Some(next_index);
           }
         }
@@ -69,8 +69,8 @@ pub fn handler(key: Key, app: &mut App) {
     }
     Key::Enter => {
       if let (Some(devices), Some(index)) = (app.devices.clone(), app.selected_device_index) {
-        if let Some(device) = &devices.devices.get(index) {
-          app.dispatch(IoEvent::TransferPlaybackToDevice(device.id.clone()));
+        if let Some(device) = devices.get(index) {
+          app.dispatch(IoEvent::TransferPlaybackToDevice(device.id.clone().unwrap_or_default()));
         }
       };
     }

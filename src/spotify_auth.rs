@@ -3,10 +3,7 @@ use std::io;
 use anyhow::{anyhow, Context, Result};
 
 use crate::config::ClientConfig;
-use rspotify::{
-  oauth2::{SpotifyOAuth, TokenInfo},
-  util::{process_token, request_token},
-};
+use rspotify::{prelude::*, AuthCodePkceSpotify, Config, Credentials};
 use std::{
   io::prelude::*,
   net::{TcpListener, TcpStream},
@@ -31,27 +28,42 @@ const SCOPES: [&str; 14] = [
 
 /// get token automatically with local webserver
 async fn get_token_auto(
-  spotify_oauth: &mut SpotifyOAuth,
+  mut spotify: AuthCodePkceSpotify,
   client_config: &ClientConfig,
-) -> Result<TokenInfo> {
-  match spotify_oauth.get_cached_token().await {
-    Some(token_info) => Ok(token_info),
-    None => match redirect_uri_web_server(spotify_oauth, client_config.get_port()) {
-      Ok(mut url) => process_token(spotify_oauth, &mut url)
-        .await
-        .ok_or_else(|| anyhow!("Failed to process response token")),
+) -> Result<AuthCodePkceSpotify> {
+  match spotify.read_token_cache(true).await {
+    Ok(Some(token)) => {
+      *spotify.get_token().lock().await.unwrap() = Some(token);
+      spotify.write_token_cache().await?;
+      spotify.auto_reauth().await?;
+      Ok(spotify)
+    }
+    _ => match redirect_uri_web_server(&mut spotify, client_config.get_port()) {
+      Ok(url) => {
+        let full_url = client_config.get_redirect_uri() + &url;
+        let code = spotify
+          .parse_response_code(&full_url)
+          .with_context(|| "Invalid url received from webserver")?;
+        spotify.request_token(&code).await?;
+        Ok(spotify)
+      }
       Err(err) => {
         println!(
           "Starting webserver failed: {}\nContinuing with manual authentication",
           err
         );
-        request_token(spotify_oauth);
+        let url = spotify.get_authorize_url(None)?;
+        webbrowser::open(&url)?;
         println!("Enter the URL you were redirected to: ");
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {
-          Ok(_) => process_token(spotify_oauth, &mut input)
-            .await
-            .ok_or_else(|| anyhow!("Failed to process response token")),
+          Ok(_) => {
+            let code = spotify
+              .parse_response_code(&input)
+              .with_context(|| "Invalid url received from user")?;
+            spotify.request_token(&code).await?;
+            Ok(spotify)
+          }
           Err(err) => Err(anyhow!(err)),
         }
       }
@@ -60,25 +72,31 @@ async fn get_token_auto(
   }
 }
 
-pub async fn authorize_spotify(client_config: &ClientConfig) -> Result<(SpotifyOAuth, TokenInfo)> {
+pub async fn authorize_spotify(client_config: &ClientConfig) -> Result<AuthCodePkceSpotify> {
   let config_paths = client_config.get_or_build_paths()?;
 
   // Start authorization with spotify
-  let mut oauth = SpotifyOAuth::default()
-    .client_id(&client_config.client_id)
-    .client_secret(&client_config.client_secret)
-    .redirect_uri(&client_config.get_redirect_uri())
-    .cache_path(config_paths.token_cache_path)
-    .scope(&SCOPES.join(" "))
-    .build();
-  let token_info = get_token_auto(&mut oauth, client_config).await?;
-  Ok((oauth, token_info))
+  let creds = Credentials::new_pkce(&client_config.client_id);
+  let oauth = rspotify::OAuth {
+    redirect_uri: client_config.get_redirect_uri(),
+    scopes: SCOPES.iter().map(|&scope| scope.to_owned()).collect(),
+    ..Default::default()
+  };
+  let spotify_config = Config {
+    cache_path: config_paths.token_cache_path,
+    token_cached: true,
+    token_refreshing: true,
+    ..Default::default()
+  };
+  let spotify = AuthCodePkceSpotify::with_config(creds, oauth, spotify_config);
+  get_token_auto(spotify, client_config).await
 }
 
-pub fn redirect_uri_web_server(spotify_oauth: &mut SpotifyOAuth, port: u16) -> Result<String> {
+pub fn redirect_uri_web_server(spotify: &mut AuthCodePkceSpotify, port: u16) -> Result<String> {
   let listener = TcpListener::bind(("127.0.0.1", port))?;
 
-  request_token(spotify_oauth);
+  let url = spotify.get_authorize_url(None)?;
+  webbrowser::open(&url)?;
 
   for stream in listener.incoming() {
     match stream {

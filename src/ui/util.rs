@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::super::app::{ActiveBlock, App, ArtistBlock, SearchResultBlock};
 use crate::user_config::Theme;
 use rspotify::model::artist::SimplifiedArtist;
@@ -47,9 +49,10 @@ pub fn create_artist_string(artists: &[SimplifiedArtist]) -> String {
     .join(", ")
 }
 
-pub fn millis_to_minutes(millis: u128) -> String {
-  let minutes = millis / 60000;
-  let seconds = (millis % 60000) / 1000;
+pub fn duration_to_minutes(duration: Duration) -> String {
+  let secs = duration.as_secs();
+  let minutes = secs / 60;
+  let seconds = secs % 60;
   let seconds_display = if seconds < 10 {
     format!("0{}", seconds)
   } else {
@@ -63,10 +66,10 @@ pub fn millis_to_minutes(millis: u128) -> String {
   }
 }
 
-pub fn display_track_progress(progress: u128, track_duration: u32) -> String {
-  let duration = millis_to_minutes(u128::from(track_duration));
-  let progress_display = millis_to_minutes(progress);
-  let remaining = millis_to_minutes(u128::from(track_duration).saturating_sub(progress));
+pub fn display_track_progress(progress: Duration, track_duration: Duration) -> String {
+  let duration = duration_to_minutes(track_duration);
+  let progress_display = duration_to_minutes(progress);
+  let remaining = duration_to_minutes(track_duration.saturating_sub(progress));
 
   format!("{}/{} (-{})", progress_display, duration, remaining,)
 }
@@ -79,10 +82,10 @@ pub fn get_percentage_width(width: u16, percentage: f32) -> u16 {
 }
 
 // Ensure track progress percentage is between 0 and 100 inclusive
-pub fn get_track_progress_percentage(song_progress_ms: u128, track_duration_ms: u32) -> u16 {
+pub fn get_track_progress_percentage(song_progress: Duration, track_duration: Duration) -> u16 {
   let min_perc = 0_f64;
-  let track_progress = std::cmp::min(song_progress_ms, track_duration_ms.into());
-  let track_perc = (track_progress as f64 / f64::from(track_duration_ms)) * 100_f64;
+  let track_progress = std::cmp::min(song_progress, track_duration.into());
+  let track_perc = (track_progress.as_secs_f64() / track_duration.as_secs_f64()) * 100_f64;
   min_perc.max(track_perc) as u16
 }
 
@@ -102,39 +105,39 @@ mod tests {
 
   #[test]
   fn millis_to_minutes_test() {
-    assert_eq!(millis_to_minutes(0), "0:00");
-    assert_eq!(millis_to_minutes(1000), "0:01");
-    assert_eq!(millis_to_minutes(1500), "0:01");
-    assert_eq!(millis_to_minutes(1900), "0:01");
-    assert_eq!(millis_to_minutes(60 * 1000), "1:00");
-    assert_eq!(millis_to_minutes(60 * 1500), "1:30");
+    assert_eq!(duration_to_minutes(Duration::from_millis(0)), "0:00");
+    assert_eq!(duration_to_minutes(Duration::from_millis(1000)), "0:01");
+    assert_eq!(duration_to_minutes(Duration::from_millis(1500)), "0:01");
+    assert_eq!(duration_to_minutes(Duration::from_millis(1900)), "0:01");
+    assert_eq!(duration_to_minutes(Duration::from_millis(60 * 1000)), "1:00");
+    assert_eq!(duration_to_minutes(Duration::from_millis(90 * 1000)), "1:30");
   }
 
   #[test]
   fn display_track_progress_test() {
     assert_eq!(
-      display_track_progress(0, 2 * 60 * 1000),
+      display_track_progress(Duration::from_secs(0), Duration::from_secs(2 * 60)),
       "0:00/2:00 (-2:00)"
     );
 
     assert_eq!(
-      display_track_progress(60 * 1000, 2 * 60 * 1000),
+      display_track_progress(Duration::from_secs(60), Duration::from_secs(2 * 60)),
       "1:00/2:00 (-1:00)"
     );
   }
 
   #[test]
   fn get_track_progress_percentage_test() {
-    let track_length = 60 * 1000;
-    assert_eq!(get_track_progress_percentage(0, track_length), 0);
+    let track_length = Duration::from_secs(60);
+    assert_eq!(get_track_progress_percentage(Duration::from_secs(0), track_length), 0);
     assert_eq!(
-      get_track_progress_percentage((60 * 1000) / 2, track_length),
+      get_track_progress_percentage(Duration::from_secs(30), track_length),
       50
     );
 
     // If progress is somehow higher than total duration, 100 should be max
     assert_eq!(
-      get_track_progress_percentage(60 * 1000 * 2, track_length),
+      get_track_progress_percentage(Duration::from_secs(120), track_length),
       100
     );
   }

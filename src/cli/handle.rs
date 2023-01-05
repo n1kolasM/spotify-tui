@@ -26,9 +26,8 @@ pub async fn handle_matches(
 
   let devices_list = match &cli.net.app.lock().await.devices {
     Some(p) => p
-      .devices
       .iter()
-      .map(|d| d.id.clone())
+      .filter_map(|d| d.id.clone())
       .collect::<Vec<String>>(),
     None => Vec::new(),
   };
@@ -95,7 +94,7 @@ pub async fn handle_matches(
       let format = matches.value_of("format").unwrap();
 
       if let Some(uri) = matches.value_of("uri") {
-        cli.play_uri(uri.to_string(), queue, random).await;
+        cli.play_uri(uri.to_string(), queue, random).await?;
       } else if let Some(name) = matches.value_of("name") {
         let category = Type::play_from_matches(matches);
         cli.play(name.to_string(), category, queue, random).await?;

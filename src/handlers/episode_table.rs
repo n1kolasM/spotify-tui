@@ -1,3 +1,5 @@
+use rspotify::prelude::PlayableId;
+
 use super::{
   super::app::{App, EpisodeTableContext},
   common_key_events,
@@ -69,8 +71,8 @@ fn on_enter(app: &mut App) {
     let episode_uris = episodes
       .items
       .iter()
-      .map(|episode| episode.uri.to_owned())
-      .collect::<Vec<String>>();
+      .map(|episode| PlayableId::Episode(episode.id.clone_static()))
+      .collect::<Vec<PlayableId<'static>>>();
     app.dispatch(IoEvent::StartPlayback(
       None,
       Some(episode_uris),

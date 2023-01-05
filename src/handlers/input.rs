@@ -3,6 +3,7 @@ extern crate unicode_width;
 use super::super::app::{ActiveBlock, App, RouteId};
 use crate::event::Key;
 use crate::network::IoEvent;
+use rspotify::model::{AlbumId, ArtistId, TrackId, PlaylistId, ShowId};
 use std::convert::TryInto;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -114,7 +115,7 @@ fn process_input(app: &mut App, input: String) {
   app.push_navigation_stack(RouteId::Search, ActiveBlock::SearchResultBlock);
 }
 
-fn spotify_resource_id(base: &str, uri: &str, sep: &str, resource_type: &str) -> (String, bool) {
+fn spotify_resource_id(base: &str, uri: &str, sep: &str, resource_type: &str) -> Option<String> {
   let uri_prefix = format!("{}{}{}", base, resource_type, sep);
   let id_string_with_query_params = uri.trim_start_matches(&uri_prefix);
   let query_idx = id_string_with_query_params
@@ -123,38 +124,42 @@ fn spotify_resource_id(base: &str, uri: &str, sep: &str, resource_type: &str) ->
   let id_string = id_string_with_query_params[0..query_idx].to_string();
   // If the lengths aren't equal, we must have found a match.
   let matched = id_string_with_query_params.len() != uri.len() && id_string.len() != uri.len();
-  (id_string, matched)
+  if matched {
+    Some(id_string)
+  } else {
+    None
+  }
 }
 
 // Returns true if the input was successfully processed as a Spotify URI.
 fn attempt_process_uri(app: &mut App, input: &str, base: &str, sep: &str) -> bool {
-  let (album_id, matched) = spotify_resource_id(base, input, sep, "album");
-  if matched {
+  let album_id = spotify_resource_id(base, input, sep, "album");
+  if let Some(Ok(album_id)) = album_id.map(AlbumId::from_id) {
     app.dispatch(IoEvent::GetAlbum(album_id));
     return true;
   }
 
-  let (artist_id, matched) = spotify_resource_id(base, input, sep, "artist");
-  if matched {
+  let artist_id = spotify_resource_id(base, input, sep, "artist");
+  if let Some(Ok(artist_id)) = artist_id.map(ArtistId::from_id) {
     app.get_artist(artist_id, "".to_string());
     app.push_navigation_stack(RouteId::Artist, ActiveBlock::ArtistBlock);
     return true;
   }
 
-  let (track_id, matched) = spotify_resource_id(base, input, sep, "track");
-  if matched {
+  let track_id = spotify_resource_id(base, input, sep, "track");
+  if let Some(Ok(track_id)) = track_id.map(TrackId::from_id) {
     app.dispatch(IoEvent::GetAlbumForTrack(track_id));
     return true;
   }
 
-  let (playlist_id, matched) = spotify_resource_id(base, input, sep, "playlist");
-  if matched {
+  let playlist_id = spotify_resource_id(base, input, sep, "playlist");
+  if let Some(Ok(playlist_id)) = playlist_id.map(PlaylistId::from_id) {
     app.dispatch(IoEvent::GetPlaylistTracks(playlist_id, 0));
     return true;
   }
 
-  let (show_id, matched) = spotify_resource_id(base, input, sep, "show");
-  if matched {
+  let show_id = spotify_resource_id(base, input, sep, "show");
+  if let Some(Ok(show_id)) = show_id.map(ShowId::from_id) {
     app.dispatch(IoEvent::GetShow(show_id));
     return true;
   }

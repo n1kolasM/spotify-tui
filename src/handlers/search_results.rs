@@ -1,3 +1,5 @@
+use rspotify::{prelude::PlayableId, model::{TrackId, ArtistId}};
+
 use super::{
   super::app::{
     ActiveBlock, App, DialogContext, RecommendationsContext, RouteId, SearchResultBlock,
@@ -270,8 +272,11 @@ fn handle_add_item_to_queue(app: &mut App) {
         &app.search_results.tracks,
       ) {
         if let Some(track) = tracks.items.get(index) {
-          let uri = track.uri.clone();
-          app.dispatch(IoEvent::AddItemToQueue(uri));
+          if let Some(id) = &track.id {
+            app.dispatch(IoEvent::AddItemToQueue(PlayableId::Track(
+              id.clone_static(),
+            )));
+          }
         }
       }
     }
@@ -303,8 +308,9 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
         tracks
           .items
           .into_iter()
-          .map(|track| track.uri)
-          .collect::<Vec<String>>()
+          .filter_map(|track| track.id)
+          .map(|id| PlayableId::Track(id.into_static()))
+          .collect::<Vec<PlayableId<'static>>>()
       });
       app.dispatch(IoEvent::StartPlayback(None, track_uris, index));
     }
@@ -389,8 +395,8 @@ fn handle_recommended_tracks(app: &mut App) {
       if let Some(index) = &app.search_results.selected_tracks_index {
         if let Some(result) = app.search_results.tracks.clone() {
           if let Some(track) = result.items.get(index.to_owned()) {
-            let track_id_list: Option<Vec<String>> =
-              track.id.as_ref().map(|id| vec![id.to_string()]);
+            let track_id_list: Option<Vec<TrackId<'static>>> =
+              track.id.as_ref().map(|id| vec![id.clone_static()]);
 
             app.recommendations_context = Some(RecommendationsContext::Song);
             app.recommendations_seed = track.name.clone();
@@ -403,7 +409,7 @@ fn handle_recommended_tracks(app: &mut App) {
       if let Some(index) = &app.search_results.selected_artists_index {
         if let Some(result) = app.search_results.artists.clone() {
           if let Some(artist) = result.items.get(index.to_owned()) {
-            let artist_id_list: Option<Vec<String>> = Some(vec![artist.id.clone()]);
+            let artist_id_list: Option<Vec<ArtistId<'static>>> = Some(vec![artist.id.clone()]);
             app.recommendations_context = Some(RecommendationsContext::Artist);
             app.recommendations_seed = artist.name.clone();
             app.get_recommendations_for_seed(artist_id_list, None, None);

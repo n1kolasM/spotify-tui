@@ -16,7 +16,6 @@ const TOKEN_CACHE_FILE: &str = ".spotify_token_cache.json";
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClientConfig {
   pub client_id: String,
-  pub client_secret: String,
   pub device_id: Option<String>,
   // FIXME: port should be defined in `user_config` not in here
   pub port: Option<u16>,
@@ -31,7 +30,6 @@ impl ClientConfig {
   pub fn new() -> ClientConfig {
     ClientConfig {
       client_id: "".to_string(),
-      client_secret: "".to_string(),
       device_id: None,
       port: None,
     }
@@ -95,7 +93,6 @@ impl ClientConfig {
       let config_yml: ClientConfig = serde_yaml::from_str(&config_string)?;
 
       self.client_id = config_yml.client_id;
-      self.client_secret = config_yml.client_secret;
       self.device_id = config_yml.device_id;
       self.port = config_yml.port;
 
@@ -128,7 +125,6 @@ impl ClientConfig {
       }
 
       let client_id = ClientConfig::get_client_key_from_input("Client ID")?;
-      let client_secret = ClientConfig::get_client_key_from_input("Client Secret")?;
 
       let mut port = String::new();
       println!("\nEnter port of redirect uri (default {}): ", DEFAULT_PORT);
@@ -137,7 +133,6 @@ impl ClientConfig {
 
       let config_yml = ClientConfig {
         client_id,
-        client_secret,
         device_id: None,
         port: Some(port),
       };
@@ -148,7 +143,6 @@ impl ClientConfig {
       write!(new_config, "{}", content_yml)?;
 
       self.client_id = config_yml.client_id;
-      self.client_secret = config_yml.client_secret;
       self.device_id = config_yml.device_id;
       self.port = config_yml.port;
 

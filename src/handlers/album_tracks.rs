@@ -1,3 +1,5 @@
+use rspotify::prelude::*;
+
 use super::common_key_events;
 use crate::{
   app::{AlbumTableContext, App, RecommendationsContext},
@@ -57,19 +59,21 @@ pub fn handler(key: Key, app: &mut App) {
       AlbumTableContext::Full => {
         if let Some(selected_album) = app.selected_album_full.clone() {
           app.dispatch(IoEvent::StartPlayback(
-            Some(selected_album.album.uri),
+            Some(PlayContextId::Album(selected_album.album.id.clone_static())),
             None,
             Some(app.saved_album_tracks_index),
           ));
         };
       }
       AlbumTableContext::Simplified => {
-        if let Some(selected_album_simplified) = &app.selected_album_simplified.clone() {
-          app.dispatch(IoEvent::StartPlayback(
-            selected_album_simplified.album.uri.clone(),
-            None,
-            Some(selected_album_simplified.selected_index),
-          ));
+        if let Some(selected_album_simplified) = &app.selected_album_simplified {
+          if let Some(album_id) = &selected_album_simplified.album.id {
+            app.dispatch(IoEvent::StartPlayback(
+              Some(PlayContextId::Album(album_id.clone_static())),
+              None,
+              Some(selected_album_simplified.selected_index),
+            ));
+          }
         };
       }
     },
@@ -86,7 +90,11 @@ pub fn handler(key: Key, app: &mut App) {
             .items
             .get(app.saved_album_tracks_index)
           {
-            app.dispatch(IoEvent::AddItemToQueue(track.uri.clone()));
+            if let Some(track_id) = track.id.clone() {
+              app.dispatch(IoEvent::AddItemToQueue(PlayableId::Track(
+                track_id.into_static(),
+              )));
+            }
           }
         };
       }
@@ -97,7 +105,11 @@ pub fn handler(key: Key, app: &mut App) {
             .items
             .get(selected_album_simplified.selected_index)
           {
-            app.dispatch(IoEvent::AddItemToQueue(track.uri.clone()));
+            if let Some(track_id) = track.id.clone() {
+              app.dispatch(IoEvent::AddItemToQueue(PlayableId::Track(
+                track_id.into_static(),
+              )));
+            }
           }
         };
       }
@@ -162,34 +174,34 @@ fn handle_low_event(app: &mut App) {
 fn handle_recommended_tracks(app: &mut App) {
   match app.album_table_context {
     AlbumTableContext::Full => {
-      if let Some(albums) = &app.library.clone().saved_albums.get_results(None) {
+      if let Some(albums) = app.library.saved_albums.get_results(None) {
         if let Some(selected_album) = albums.items.get(app.album_list_index) {
-          if let Some(track) = &selected_album
+          if let Some(track) = selected_album
             .album
             .tracks
             .items
             .get(app.saved_album_tracks_index)
           {
-            if let Some(id) = &track.id {
+            if let Some(track_id) = &track.id {
               app.recommendations_context = Some(RecommendationsContext::Song);
               app.recommendations_seed = track.name.clone();
-              app.get_recommendations_for_track_id(id.to_string());
+              app.get_recommendations_for_track_id(track_id.clone());
             }
           }
         }
       }
     }
     AlbumTableContext::Simplified => {
-      if let Some(selected_album_simplified) = &app.selected_album_simplified.clone() {
-        if let Some(track) = &selected_album_simplified
+      if let Some(selected_album_simplified) = &app.selected_album_simplified {
+        if let Some(track) = selected_album_simplified
           .tracks
           .items
           .get(selected_album_simplified.selected_index)
         {
-          if let Some(id) = &track.id {
+          if let Some(track_id) = &track.id {
             app.recommendations_context = Some(RecommendationsContext::Song);
             app.recommendations_seed = track.name.clone();
-            app.get_recommendations_for_track_id(id.to_string());
+            app.get_recommendations_for_track_id(track_id.clone());
           }
         }
       };
@@ -200,7 +212,7 @@ fn handle_recommended_tracks(app: &mut App) {
 fn handle_save_event(app: &mut App) {
   match app.album_table_context {
     AlbumTableContext::Full => {
-      if let Some(selected_album) = app.selected_album_full.clone() {
+      if let Some(selected_album) = &app.selected_album_full {
         if let Some(selected_track) = selected_album
           .album
           .tracks
@@ -208,20 +220,20 @@ fn handle_save_event(app: &mut App) {
           .get(app.saved_album_tracks_index)
         {
           if let Some(track_id) = &selected_track.id {
-            app.dispatch(IoEvent::ToggleSaveTrack(track_id.to_string()));
+            app.dispatch(IoEvent::ToggleSaveTrack(track_id.clone_static()));
           };
         };
       };
     }
     AlbumTableContext::Simplified => {
-      if let Some(selected_album_simplified) = app.selected_album_simplified.clone() {
+      if let Some(selected_album_simplified) = &app.selected_album_simplified {
         if let Some(selected_track) = selected_album_simplified
           .tracks
           .items
           .get(selected_album_simplified.selected_index)
         {
           if let Some(track_id) = &selected_track.id {
-            app.dispatch(IoEvent::ToggleSaveTrack(track_id.to_string()));
+            app.dispatch(IoEvent::ToggleSaveTrack(track_id.clone_static()));
           };
         };
       };
@@ -232,15 +244,15 @@ fn handle_save_event(app: &mut App) {
 fn handle_save_album_event(app: &mut App) {
   match app.album_table_context {
     AlbumTableContext::Full => {
-      if let Some(selected_album) = app.selected_album_full.clone() {
+      if let Some(selected_album) = &app.selected_album_full {
         let album_id = &selected_album.album.id;
-        app.dispatch(IoEvent::CurrentUserSavedAlbumAdd(album_id.to_string()));
+        app.dispatch(IoEvent::CurrentUserSavedAlbumAdd(album_id.clone_static()));
       };
     }
     AlbumTableContext::Simplified => {
-      if let Some(selected_album_simplified) = app.selected_album_simplified.clone() {
-        if let Some(album_id) = selected_album_simplified.album.id {
-          app.dispatch(IoEvent::CurrentUserSavedAlbumAdd(album_id));
+      if let Some(selected_album_simplified) = &app.selected_album_simplified {
+        if let Some(album_id) = &selected_album_simplified.album.id {
+          app.dispatch(IoEvent::CurrentUserSavedAlbumAdd(album_id.clone_static()));
         };
       };
     }

@@ -1,11 +1,17 @@
+use std::time::Duration;
+
 use crate::network::{IoEvent, Network};
 use crate::user_config::UserConfig;
 
 use super::util::{Flag, Format, FormatType, JumpDirection, Type};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use rand::{thread_rng, Rng};
-use rspotify::model::{context::CurrentlyPlaybackContext, PlayingItem};
+use rspotify::model::{
+  context::CurrentPlaybackContext, parse_uri, AlbumId, ArtistId, EpisodeId, PlayableItem,
+  PlaylistId, ShowId, TrackId,
+};
+use rspotify::prelude::*;
 
 pub struct CliApp<'a> {
   pub net: Network<'a>,
@@ -21,15 +27,21 @@ impl<'a> CliApp<'a> {
     Self { net, config }
   }
 
-  async fn is_a_saved_track(&mut self, id: &str) -> bool {
+  async fn is_a_saved_track<'id>(&mut self, id: TrackId<'id>) -> bool {
     // Update the liked_song_ids_set
     self
       .net
-      .handle_network_event(IoEvent::CurrentUserSavedTracksContains(
-        vec![id.to_string()],
-      ))
+      .handle_network_event(IoEvent::CurrentUserSavedTracksContains(vec![
+        id.clone_static()
+      ]))
       .await;
-    self.net.app.lock().await.liked_song_ids_set.contains(id)
+    self
+      .net
+      .app
+      .lock()
+      .await
+      .liked_song_ids_set
+      .contains(&id.into_static())
   }
 
   pub fn format_output(&self, mut format: String, values: Vec<Format>) -> String {
@@ -62,20 +74,11 @@ impl<'a> CliApp<'a> {
   // Basically copy-pasted the 'copy_song_url' function
   pub async fn share_track_or_episode(&mut self) -> Result<String> {
     let app = self.net.app.lock().await;
-    if let Some(CurrentlyPlaybackContext {
+    if let Some(CurrentPlaybackContext {
       item: Some(item), ..
     }) = &app.current_playback_context
     {
-      match item {
-        PlayingItem::Track(track) => Ok(format!(
-          "https://open.spotify.com/track/{}",
-          track.id.to_owned().unwrap_or_default()
-        )),
-        PlayingItem::Episode(episode) => Ok(format!(
-          "https://open.spotify.com/episode/{}",
-          episode.id.to_owned()
-        )),
-      }
+      Ok(item.id().with_context(|| "no id for track")?.url())
     } else {
       Err(anyhow!(
         "failed to generate a shareable url for the current song"
@@ -87,19 +90,20 @@ impl<'a> CliApp<'a> {
   // Basically copy-pasted the 'copy_album_url' function
   pub async fn share_album_or_show(&mut self) -> Result<String> {
     let app = self.net.app.lock().await;
-    if let Some(CurrentlyPlaybackContext {
+    if let Some(CurrentPlaybackContext {
       item: Some(item), ..
     }) = &app.current_playback_context
     {
       match item {
-        PlayingItem::Track(track) => Ok(format!(
-          "https://open.spotify.com/album/{}",
-          track.album.id.to_owned().unwrap_or_default()
-        )),
-        PlayingItem::Episode(episode) => Ok(format!(
-          "https://open.spotify.com/show/{}",
-          episode.show.id.to_owned()
-        )),
+        PlayableItem::Track(track) => Ok(
+          track
+            .album
+            .id
+            .as_ref()
+            .with_context(|| "no id for album")?
+            .url(),
+        ),
+        PlayableItem::Episode(episode) => Ok(episode.show.id.url()),
       }
     } else {
       Err(anyhow!(
@@ -114,14 +118,14 @@ impl<'a> CliApp<'a> {
     let mut app = self.net.app.lock().await;
     let mut device_index = 0;
     if let Some(dp) = &app.devices {
-      for (i, d) in dp.devices.iter().enumerate() {
+      for (i, d) in dp.iter().enumerate() {
         if d.name == name {
           device_index = i;
           // Save the id of the device
           self
             .net
             .client_config
-            .set_device_id(d.id.clone())
+            .set_device_id(d.id.clone().with_context(|| "no id for device")?)
             .map_err(|_e| anyhow!("failed to use device with name '{}'", d.name))?;
         }
       }
@@ -182,14 +186,13 @@ impl<'a> CliApp<'a> {
       Type::Device => {
         if let Some(devices) = &self.net.app.lock().await.devices {
           devices
-            .devices
             .iter()
             .map(|d| {
               self.format_output(
                 format.to_string(),
                 vec![
                   Format::Device(d.name.clone()),
-                  Format::Volume(d.volume_percent),
+                  Format::Volume(d.volume_percent.unwrap_or_default()),
                 ],
               )
             })
@@ -254,9 +257,9 @@ impl<'a> CliApp<'a> {
     // Get the device id by name
     let mut id = String::new();
     if let Some(devices) = &self.net.app.lock().await.devices {
-      for d in &devices.devices {
+      for d in devices {
         if d.name == device {
-          id.push_str(d.id.as_str());
+          id.push_str(d.id.as_ref().map(|id| id.as_str()).unwrap_or("<unknown>"));
           break;
         }
       }
@@ -285,40 +288,35 @@ impl<'a> CliApp<'a> {
         .handle_network_event(IoEvent::GetCurrentPlayback)
         .await;
       let app = self.net.app.lock().await;
-      if let Some(CurrentlyPlaybackContext {
-        progress_ms: Some(ms),
+      if let Some(CurrentPlaybackContext {
+        progress: Some(progress),
         item: Some(item),
         ..
       }) = &app.current_playback_context
       {
         let duration = match item {
-          PlayingItem::Track(track) => track.duration_ms,
-          PlayingItem::Episode(episode) => episode.duration_ms,
+          PlayableItem::Track(track) => track.duration,
+          PlayableItem::Episode(episode) => episode.duration,
         };
 
-        (*ms, duration)
+        (*progress, duration)
       } else {
         return Err(anyhow!("no context available"));
       }
     };
 
-    // Convert secs to ms
-    let ms = seconds * 1000;
+    let seek_duration = Duration::from_secs(seconds.into());
     // Calculate new positon
     let position_to_seek = if seconds_str.starts_with('+') {
-      current_pos + ms
+      current_pos + seek_duration
     } else if seconds_str.starts_with('-') {
       // Jump to the beginning if the position_to_seek would be
       // negative, must be checked before the calculation to avoid
       // an 'underflow'
-      if ms > current_pos {
-        0u32
-      } else {
-        current_pos - ms
-      }
+      current_pos.saturating_sub(seek_duration)
     } else {
       // Absolute value of the track
-      seconds * 1000
+      seek_duration
     };
 
     // Check if position_to_seek is greater than duration (next track)
@@ -328,7 +326,7 @@ impl<'a> CliApp<'a> {
       // This seeks to a position in the current song
       self
         .net
-        .handle_network_event(IoEvent::Seek(position_to_seek))
+        .handle_network_event(IoEvent::Seek(duration.as_millis() as u32))
         .await;
     }
 
@@ -350,25 +348,25 @@ impl<'a> CliApp<'a> {
         // Get the id of the current song
         let id = match c.item {
           Some(i) => match i {
-            PlayingItem::Track(t) => t.id.ok_or_else(|| anyhow!("item has no id")),
-            PlayingItem::Episode(_) => Err(anyhow!("saving episodes not yet implemented")),
+            PlayableItem::Track(t) => t.id.ok_or_else(|| anyhow!("item has no id")),
+            PlayableItem::Episode(_) => Err(anyhow!("saving episodes not yet implemented")),
           },
           None => Err(anyhow!("no item playing")),
         }?;
 
         // Want to like but is already liked -> do nothing
         // Want to like and is not liked yet -> like
-        if s && !self.is_a_saved_track(&id).await {
+        if s && !self.is_a_saved_track(id.clone()).await {
           self
             .net
-            .handle_network_event(IoEvent::ToggleSaveTrack(id))
+            .handle_network_event(IoEvent::ToggleSaveTrack(id.into_static()))
             .await;
         // Want to dislike but is already disliked -> do nothing
         // Want to dislike and is liked currently -> remove like
-        } else if !s && self.is_a_saved_track(&id).await {
+        } else if !s && self.is_a_saved_track(id.clone()).await {
           self
             .net
-            .handle_network_event(IoEvent::ToggleSaveTrack(id))
+            .handle_network_event(IoEvent::ToggleSaveTrack(id.into_static()))
             .await;
         }
       }
@@ -413,23 +411,23 @@ impl<'a> CliApp<'a> {
     let playing_item = context.item.ok_or_else(|| anyhow!("no track playing"))?;
 
     let mut hs = match playing_item {
-      PlayingItem::Track(track) => {
-        let id = track.id.clone().unwrap_or_default();
+      PlayableItem::Track(track) => {
+        let id = track.id.clone().ok_or_else(|| anyhow!("no id for track"))?;
         let mut hs = Format::from_type(FormatType::Track(Box::new(track.clone())));
-        if let Some(ms) = context.progress_ms {
-          hs.push(Format::Position((ms, track.duration_ms)))
+        if let Some(progress) = context.progress {
+          hs.push(Format::Position((progress, track.duration)))
         }
         hs.push(Format::Flags((
           context.repeat_state,
           context.shuffle_state,
-          self.is_a_saved_track(&id).await,
+          self.is_a_saved_track(id).await,
         )));
         hs
       }
-      PlayingItem::Episode(episode) => {
+      PlayableItem::Episode(episode) => {
         let mut hs = Format::from_type(FormatType::Episode(Box::new(episode.clone())));
-        if let Some(ms) = context.progress_ms {
-          hs.push(Format::Position((ms, episode.duration_ms)))
+        if let Some(ms) = context.progress {
+          hs.push(Format::Position((ms, episode.duration)))
         }
         hs.push(Format::Flags((
           context.repeat_state,
@@ -441,62 +439,81 @@ impl<'a> CliApp<'a> {
     };
 
     hs.push(Format::Device(context.device.name));
-    hs.push(Format::Volume(context.device.volume_percent));
+    hs.push(Format::Volume(
+      context.device.volume_percent.unwrap_or_default(),
+    ));
     hs.push(Format::Playing(context.is_playing));
 
     Ok(self.format_output(format, hs))
   }
 
-  // spt play -u URI
-  pub async fn play_uri(&mut self, uri: String, queue: bool, random: bool) {
-    let offset = if random {
-      // Only works with playlists for now
-      if uri.contains("spotify:playlist:") {
-        let id = uri.split(':').last().unwrap();
-        match self.net.spotify.playlist(id, None, None).await {
-          Ok(p) => {
-            let num = p.tracks.total;
-            Some(thread_rng().gen_range(0..num) as usize)
-          }
-          Err(e) => {
-            self
-              .net
-              .app
-              .lock()
-              .await
-              .handle_error(anyhow!(e.to_string()));
-            return;
-          }
-        }
-      } else {
-        None
+  async fn play_impl(
+    &mut self,
+    context_id: Option<PlayContextId<'static>>,
+    playable_id: Option<PlayableId<'static>>,
+    queue: bool,
+    random: bool,
+    display_name: &str,
+  ) -> Result<()> {
+    let offset = match &context_id {
+      Some(PlayContextId::Playlist(playlist_id)) if random => {
+        let playlist = self
+          .net
+          .spotify
+          .playlist(playlist_id.clone(), None, None)
+          .await?;
+        Some(thread_rng().gen_range(0..playlist.tracks.total) as usize)
       }
-    } else {
-      None
+      Some(PlayContextId::Album(album_id)) if random => {
+        let playlist = self.net.spotify.album(album_id.clone()).await?;
+        Some(thread_rng().gen_range(0..playlist.tracks.total) as usize)
+      }
+      _ => None,
     };
-
-    if uri.contains("spotify:track:") {
-      if queue {
+    if queue {
+      if let Some(playable_id) = playable_id {
         self
           .net
-          .handle_network_event(IoEvent::AddItemToQueue(uri))
+          .handle_network_event(IoEvent::AddItemToQueue(playable_id))
           .await;
       } else {
-        self
-          .net
-          .handle_network_event(IoEvent::StartPlayback(
-            None,
-            Some(vec![uri.clone()]),
-            Some(0),
-          ))
-          .await;
+        return Err(anyhow!(
+          "Cannot queue '{}', try playing without queue",
+          display_name
+        ));
       }
     } else {
       self
         .net
-        .handle_network_event(IoEvent::StartPlayback(Some(uri.clone()), None, offset))
+        .handle_network_event(IoEvent::StartPlayback(
+          context_id,
+          playable_id.map(|id| vec![id]),
+          offset,
+        ))
         .await;
     }
+    Ok(())
+  }
+
+  // spt play -u URI
+  pub async fn play_uri(&mut self, uri: String, queue: bool, random: bool) -> Result<()> {
+    let (_type, id) = parse_uri(&uri)?;
+    let (context_id, playable_id) = match _type {
+      rspotify::model::Type::Artist => (Some(ArtistId::from_id(id)?.into_static().into()), None),
+      rspotify::model::Type::Album => (Some(AlbumId::from_id(id)?.into_static().into()), None),
+      rspotify::model::Type::Track => (None, Some(TrackId::from_id(id)?.into_static().into())),
+      rspotify::model::Type::Playlist => {
+        (Some(PlaylistId::from_id(id)?.into_static().into()), None)
+      }
+      rspotify::model::Type::Show => (Some(ShowId::from_id(id)?.into_static().into()), None),
+      rspotify::model::Type::Episode => (None, Some(EpisodeId::from_id(id)?.into_static().into())),
+      _ => {
+        return Err(anyhow!("Cannot play '{}'", uri));
+      }
+    };
+    self
+      .play_impl(context_id, playable_id, queue, random, &uri)
+      .await
   }
 
   // spt play -n NAME ...
@@ -507,12 +524,17 @@ impl<'a> CliApp<'a> {
       .await;
     // Get the uri of the first found
     // item + the offset or return an error message
-    let uri = {
+    let (context_id, playable_id) = {
       let results = &self.net.app.lock().await.search_results;
       match item {
         Type::Track => {
           if let Some(r) = &results.tracks {
-            r.items[0].uri.clone()
+            let track = &r.items[0];
+            if let Some(track_id) = &track.id {
+              (None, Some(track_id.clone_static().into()))
+            } else {
+              return Err(anyhow!("track {} has no id", track.name));
+            }
           } else {
             return Err(anyhow!("no tracks with name '{}'", name));
           }
@@ -520,8 +542,8 @@ impl<'a> CliApp<'a> {
         Type::Album => {
           if let Some(r) = &results.albums {
             let album = &r.items[0];
-            if let Some(uri) = &album.uri {
-              uri.clone()
+            if let Some(album_id) = &album.id {
+              (Some(album_id.clone_static().into()), None)
             } else {
               return Err(anyhow!("album {} has no uri", album.name));
             }
@@ -531,14 +553,14 @@ impl<'a> CliApp<'a> {
         }
         Type::Artist => {
           if let Some(r) = &results.artists {
-            r.items[0].uri.clone()
+            (Some(r.items[0].id.clone_static().into()), None)
           } else {
             return Err(anyhow!("no artists with name '{}'", name));
           }
         }
         Type::Show => {
           if let Some(r) = &results.shows {
-            r.items[0].uri.clone()
+            (Some(r.items[0].id.clone_static().into()), None)
           } else {
             return Err(anyhow!("no shows with name '{}'", name));
           }
@@ -547,7 +569,7 @@ impl<'a> CliApp<'a> {
           if let Some(r) = &results.playlists {
             let p = &r.items[0];
             // For a random song, create a random offset
-            p.uri.clone()
+            (Some(p.id.clone_static().into()), None)
           } else {
             return Err(anyhow!("no playlists with name '{}'", name));
           }
@@ -557,9 +579,9 @@ impl<'a> CliApp<'a> {
     };
 
     // Play or queue the uri
-    self.play_uri(uri, queue, random).await;
-
-    Ok(())
+    self
+      .play_impl(context_id, playable_id, queue, random, &name)
+      .await
   }
 
   // spt query -s SEARCH ...

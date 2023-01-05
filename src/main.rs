@@ -27,7 +27,7 @@ use crossterm::{
   },
   ExecutableCommand,
 };
-use network::{get_spotify, IoEvent, Network};
+use network::{IoEvent, Network};
 use spotify_auth::authorize_spotify;
 use std::{
   cmp::{max, min},
@@ -35,7 +35,6 @@ use std::{
   panic::{self, PanicInfo},
   path::PathBuf,
   sync::Arc,
-  time::SystemTime,
 };
 use tokio::sync::Mutex;
 use tui::{
@@ -165,25 +164,19 @@ of the app. Beware that this comes at a CPU cost!",
   let mut client_config = ClientConfig::new();
   client_config.load_config()?;
 
-  let (oauth, token_info) = authorize_spotify(&client_config)
+  let spotify = authorize_spotify(&client_config)
     .await
     .with_context(|| "Failed to authorize spotify")?;
   let (sync_io_tx, sync_io_rx) = std::sync::mpsc::channel::<IoEvent>();
 
-  let (spotify, token_expiry) = get_spotify(token_info);
-
   // Initialise app state
-  let app = Arc::new(Mutex::new(App::new(
-    sync_io_tx,
-    user_config.clone(),
-    token_expiry,
-  )));
+  let app = Arc::new(Mutex::new(App::new(sync_io_tx, user_config.clone())));
 
   // Work with the cli (not really async)
   if let Some(cmd) = matches.subcommand_name() {
     // Save, because we checked if the subcommand is present at runtime
     let m = matches.subcommand_matches(cmd).unwrap();
-    let network = Network::new(oauth, spotify, client_config, &app);
+    let network = Network::new(spotify, client_config, &app);
     println!(
       "{}",
       cli::handle_matches(m, cmd.to_string(), network, user_config).await?
@@ -192,7 +185,7 @@ of the app. Beware that this comes at a CPU cost!",
   } else {
     let cloned_app = Arc::clone(&app);
     std::thread::spawn(move || {
-      let mut network = Network::new(oauth, spotify, client_config, &app);
+      let mut network = Network::new(spotify, client_config, &app);
       start_tokio(sync_io_rx, &mut network);
     });
     // The UI must run in the "main" thread
@@ -203,7 +196,7 @@ of the app. Beware that this comes at a CPU cost!",
 }
 
 #[tokio::main]
-async fn start_tokio<'a>(io_rx: std::sync::mpsc::Receiver<IoEvent>, network: &mut Network) {
+async fn start_tokio<'a>(io_rx: std::sync::mpsc::Receiver<IoEvent<'static>>, network: &mut Network) {
   while let Ok(io_event) = io_rx.recv() {
     network.handle_network_event(io_event).await;
   }
@@ -302,11 +295,6 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
       cursor_offset + app.input_cursor_position,
       cursor_offset,
     ))?;
-
-    // Handle authentication refresh
-    if SystemTime::now() > app.spotify_token_expiry {
-      app.dispatch(IoEvent::RefreshAuthentication);
-    }
 
     match events.next()? {
       event::Event::Input(key) => {

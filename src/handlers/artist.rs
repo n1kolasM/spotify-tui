@@ -1,3 +1,6 @@
+use rspotify::model::{ArtistId, TrackId};
+use rspotify::prelude::PlayableId;
+
 use super::common_key_events;
 use crate::app::{ActiveBlock, App, ArtistBlock, RecommendationsContext, TrackTableContext};
 use crate::event::Key;
@@ -162,7 +165,8 @@ fn handle_recommend_event_on_selected_block(app: &mut App) {
       ArtistBlock::TopTracks => {
         let selected_index = artist.selected_top_track_index;
         if let Some(track) = artist.top_tracks.get(selected_index) {
-          let track_id_list: Option<Vec<String>> = track.id.as_ref().map(|id| vec![id.to_string()]);
+          let track_id_list: Option<Vec<TrackId<'static>>> =
+            track.id.as_ref().map(|id| vec![id.clone_static()]);
           app.recommendations_context = Some(RecommendationsContext::Song);
           app.recommendations_seed = track.name.clone();
           app.get_recommendations_for_seed(None, track_id_list, Some(track.clone()));
@@ -172,7 +176,7 @@ fn handle_recommend_event_on_selected_block(app: &mut App) {
         let selected_index = artist.selected_related_artist_index;
         let artist_id = &artist.related_artists[selected_index].id;
         let artist_name = &artist.related_artists[selected_index].name;
-        let artist_id_list: Option<Vec<String>> = Some(vec![artist_id.clone()]);
+        let artist_id_list: Option<Vec<ArtistId<'static>>> = Some(vec![artist_id.clone_static()]);
 
         app.recommendations_context = Some(RecommendationsContext::Artist);
         app.recommendations_seed = artist_name.clone();
@@ -184,14 +188,19 @@ fn handle_recommend_event_on_selected_block(app: &mut App) {
 }
 
 fn handle_enter_event_on_selected_block(app: &mut App) {
-  if let Some(artist) = &mut app.artist.clone() {
-    match artist.artist_selected_block {
+  if let Some(artist) = &app.artist {
+    match &artist.artist_selected_block {
       ArtistBlock::TopTracks => {
         let selected_index = artist.selected_top_track_index;
         let top_tracks = artist
           .top_tracks
           .iter()
-          .map(|track| track.uri.to_owned())
+          .filter_map(|track| {
+            track
+              .id
+              .as_ref()
+              .map(|id| PlayableId::Track(id.clone_static()))
+          })
           .collect();
         app.dispatch(IoEvent::StartPlayback(
           None,
@@ -200,14 +209,9 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
         ));
       }
       ArtistBlock::Albums => {
-        if let Some(selected_album) = artist
-          .albums
-          .items
-          .get(artist.selected_album_index)
-          .cloned()
-        {
+        if let Some(selected_album) = artist.albums.items.get(artist.selected_album_index) {
           app.track_table.context = Some(TrackTableContext::AlbumSearch);
-          app.dispatch(IoEvent::GetAlbumTracks(Box::new(selected_album)));
+          app.dispatch(IoEvent::GetAlbumTracks(Box::new(selected_album.clone())));
         }
       }
       ArtistBlock::RelatedArtists => {
@@ -309,8 +313,11 @@ pub fn handler(key: Key, app: &mut App) {
       _ if key == app.user_config.keys.add_item_to_queue => {
         if let ArtistBlock::TopTracks = artist.artist_selected_block {
           if let Some(track) = artist.top_tracks.get(artist.selected_top_track_index) {
-            let uri = track.uri.clone();
-            app.dispatch(IoEvent::AddItemToQueue(uri));
+            if let Some(track_id) = track.id.clone() {
+              app.dispatch(IoEvent::AddItemToQueue(PlayableId::Track(
+                track_id.into_static(),
+              )));
+            }
           };
         }
       }
